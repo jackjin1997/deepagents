@@ -83,7 +83,10 @@ class PersistentCronScheduler:
 
     async def _ticker(self) -> None:
         while not self._stopped.is_set():
-            await self.tick_once()
+            try:
+                await self.tick_once()
+            except Exception:
+                logger.exception("Cron scheduler tick failed")
             try:
                 await asyncio.wait_for(self._stopped.wait(), timeout=self.tick_seconds)
             except TimeoutError:

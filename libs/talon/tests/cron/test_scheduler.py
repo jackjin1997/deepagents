@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,43 @@ from deepagents_talon.cron.scheduler import PersistentCronScheduler
 
 def _store(tmp_path) -> CronJobStore:
     return CronJobStore(assistant_id="assistant", cron_dir=tmp_path / "cron")
+
+
+class _FailingOnceStore(CronJobStore):
+    def __init__(self, tmp_path) -> None:
+        super().__init__(assistant_id="assistant", cron_dir=tmp_path / "cron")
+        self.scan_count = 0
+        self.recovered = asyncio.Event()
+
+    def due_jobs(self, *, now: datetime) -> list[CronJob]:
+        self.scan_count += 1
+        if self.scan_count == 1:
+            msg = "temporary database failure"
+            raise RuntimeError(msg)
+        self.recovered.set()
+        return super().due_jobs(now=now)
+
+
+async def test_scheduler_continues_after_scan_failure(tmp_path, caplog) -> None:
+    store = _FailingOnceStore(tmp_path)
+    scheduler = PersistentCronScheduler(
+        store=store,
+        run_job=lambda _: _return("done"),
+        deliver_result=_deliver_returned_text,
+        tick_seconds=0.01,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="deepagents_talon.cron.scheduler"):
+        await scheduler.start()
+        try:
+            await asyncio.wait_for(store.recovered.wait(), timeout=0.2)
+            assert scheduler._task is not None
+            assert not scheduler._task.done()
+        finally:
+            await scheduler.stop()
+
+    assert store.scan_count >= 2
+    assert "Cron scheduler tick failed" in caplog.text
 
 
 async def test_scheduler_runs_due_job_and_delivers_result(tmp_path) -> None:
