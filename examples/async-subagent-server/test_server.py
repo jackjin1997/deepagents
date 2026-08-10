@@ -133,42 +133,75 @@ def test_cancel_run(client):
     assert status_resp.json()["status"] == "cancelled"
 
 
-def test_interrupt_strategy(client):
-    """Creating a run with multitask_strategy='interrupt' cancels running runs."""
-    thread = client.post("/threads").json()
-    thread_id = thread["thread_id"]
+def test_interrupt_strategy():
+    """An interrupted run cannot overwrite the replacement run's state."""
+    thread_id = "thread"
+    first_run_id = "first-run"
+    second_run_id = "second-run"
+    server._conn.execute(
+        "INSERT INTO threads (thread_id, created_at, messages) VALUES (?, ?, ?)",
+        (
+            thread_id,
+            "now",
+            json.dumps([
+                {"role": "user", "content": "first task"},
+                {"role": "user", "content": "new task"},
+            ]),
+        ),
+    )
+    server._conn.executemany(
+        "INSERT INTO runs (run_id, thread_id, assistant_id, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            (first_run_id, thread_id, "researcher", "now"),
+            (second_run_id, thread_id, "researcher", "now"),
+        ],
+    )
+    server._conn.commit()
 
-    async def slow_ainvoke(*args, **kwargs):
-        await asyncio.sleep(10)
-        return FAKE_RESPONSE
+    async def scenario() -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
 
-    with patch.object(server, "_agent") as mock_agent:
-        mock_agent.ainvoke = AsyncMock(side_effect=slow_ainvoke)
-        first_run = client.post(
-            f"/threads/{thread_id}/runs",
-            json={
-                "assistant_id": "researcher",
-                "input": {"messages": [{"role": "user", "content": "first task"}]},
-            },
-        ).json()
+        async def controlled_ainvoke(inputs):
+            message = inputs["messages"][0].content
+            if message == "first task":
+                first_started.set()
+                await release_first.wait()
+                return {"messages": [AIMessage(content="stale result")]}
+            return {"messages": [AIMessage(content="fresh result")]}
 
-        # Let the first run start.
-        asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.1))
+        with patch.object(server, "_agent") as mock_agent:
+            mock_agent.ainvoke = AsyncMock(side_effect=controlled_ainvoke)
+            first_task = asyncio.create_task(
+                server._execute_run(first_run_id, thread_id, "first task")
+            )
+            await first_started.wait()
 
-    with patch.object(server, "_agent") as mock_agent:
-        mock_agent.ainvoke = _make_ainvoke_mock()
-        second_run = client.post(
-            f"/threads/{thread_id}/runs",
-            json={
-                "assistant_id": "researcher",
-                "input": {"messages": [{"role": "user", "content": "new task"}]},
-                "multitask_strategy": "interrupt",
-            },
-        ).json()
+            server._conn.execute(
+                "UPDATE runs SET status = 'cancelled' WHERE run_id = ?",
+                (first_run_id,),
+            )
+            server._conn.commit()
 
-    # First run should be cancelled.
-    first_status = client.get(f"/threads/{thread_id}/runs/{first_run['run_id']}").json()
+            await server._execute_run(second_run_id, thread_id, "new task")
+            release_first.set()
+            await first_task
+
+    asyncio.run(scenario())
+
+    first_status = server._get_run(first_run_id)
+    assert first_status is not None
     assert first_status["status"] == "cancelled"
+    second_status = server._get_run(second_run_id)
+    assert second_status is not None
+    assert second_status["status"] == "success"
+
+    thread_state = server._get_thread(thread_id)
+    assert thread_state is not None
+    contents = [message["content"] for message in thread_state["messages"]]
+    assert "fresh result" in contents
+    assert "stale result" not in contents
 
 
 def test_404_for_missing_thread(client):

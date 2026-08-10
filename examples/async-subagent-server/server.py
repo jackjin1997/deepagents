@@ -175,6 +175,11 @@ async def _execute_run(run_id: str, thread_id: str, user_message: str) -> None:
         last = result["messages"][-1]
         output = last.content if isinstance(last.content, str) else json.dumps(last.content)
         assistant_msg = {"role": "assistant", "content": output}
+        run = _conn.execute(
+            "SELECT status FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if run is None or run["status"] != "running":
+            return
         # Fetch current messages, append the assistant reply, and persist.
         # values.messages is what the LangGraph SDK reads on success.
         row = _conn.execute(
