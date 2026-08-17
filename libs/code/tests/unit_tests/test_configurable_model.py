@@ -14,10 +14,14 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deepagents_code._cli_context import CLIContext, CLIContextSchema
-from deepagents_code.agent import build_model_identity_section
+from deepagents_code.agent import (
+    _ConfigurableModelFilesystemSlot,
+    _RuntimeFilesystemMiddleware,
+    build_model_identity_section,
+)
 from deepagents_code.configurable_model import (
     ConfigurableModelMiddleware,
     _get_context,
@@ -444,6 +448,138 @@ class TestModelSwap:
             "_model_spec": "openai:gpt-5.5",
             "_model_params": None,
         }
+
+
+class TestRuntimeModelMultimodalFiltering:
+    """Filesystem filtering must use the model selected for the current turn."""
+
+    @pytest.mark.parametrize(
+        ("message", "profile", "expected_type"),
+        [
+            (
+                HumanMessage(
+                    content_blocks=[
+                        {
+                            "type": "image",
+                            "base64": "aW1hZ2U=",
+                            "mime_type": "image/png",
+                        }
+                    ]
+                ),
+                {"image_inputs": True},
+                "image",
+            ),
+            (
+                HumanMessage(
+                    content_blocks=[
+                        {
+                            "type": "image",
+                            "base64": "aW1hZ2U=",
+                            "mime_type": "image/png",
+                        }
+                    ]
+                ),
+                {"image_inputs": False},
+                "text",
+            ),
+            (
+                ToolMessage(
+                    content_blocks=[
+                        {
+                            "type": "image",
+                            "base64": "aW1hZ2U=",
+                            "mime_type": "image/png",
+                        }
+                    ],
+                    tool_call_id="image-read",
+                    additional_kwargs={"read_file_path": "/photo.png"},
+                ),
+                {"image_inputs": True, "image_tool_message": True},
+                "image",
+            ),
+            (
+                ToolMessage(
+                    content_blocks=[
+                        {
+                            "type": "image",
+                            "base64": "aW1hZ2U=",
+                            "mime_type": "image/png",
+                        }
+                    ],
+                    tool_call_id="image-read",
+                    additional_kwargs={"read_file_path": "/photo.png"},
+                ),
+                {"image_inputs": False, "image_tool_message": False},
+                "text",
+            ),
+            (
+                ToolMessage(
+                    content_blocks=[
+                        {
+                            "type": "file",
+                            "base64": "cGRm",
+                            "mime_type": "application/pdf",
+                        }
+                    ],
+                    tool_call_id="pdf-read",
+                    additional_kwargs={"read_file_path": "/report.pdf"},
+                ),
+                {"pdf_inputs": True, "pdf_tool_message": True},
+                "file",
+            ),
+            (
+                ToolMessage(
+                    content_blocks=[
+                        {
+                            "type": "file",
+                            "base64": "cGRm",
+                            "mime_type": "application/pdf",
+                        }
+                    ],
+                    tool_call_id="pdf-read",
+                    additional_kwargs={"read_file_path": "/report.pdf"},
+                ),
+                {"pdf_inputs": False, "pdf_tool_message": False},
+                "text",
+            ),
+        ],
+    )
+    def test_filters_against_runtime_model(
+        self,
+        message: HumanMessage | ToolMessage,
+        profile: dict[str, bool],
+        expected_type: str,
+    ) -> None:
+        startup = _make_model("startup-model")
+        startup.profile = {key: not value for key, value in profile.items()}
+        active = _make_model("active-model")
+        active.profile = profile
+        runtime = SimpleNamespace(context=CLIContext(model="openai:active-model"))
+        request = ModelRequest(
+            model=startup,
+            messages=[message],
+            tools=[],
+            runtime=cast("Any", runtime),
+        )
+        captured: list[ModelRequest] = []
+        model_middleware = _ConfigurableModelFilesystemSlot(
+            openai_prompt_cache_key=False
+        )
+        filesystem_middleware = _RuntimeFilesystemMiddleware()
+
+        def filter_request(resolved: ModelRequest) -> ModelResponse[Any]:
+            result = filesystem_middleware.wrap_model_call(
+                resolved,
+                lambda filtered: (captured.append(filtered), _make_response())[1],
+            )
+            assert isinstance(result, ModelResponse)
+            return result
+
+        with patch(_PATCH_CREATE, return_value=_make_model_result(active)):
+            model_middleware.wrap_model_call(request, filter_request)
+
+        assert captured[0].model is active
+        assert captured[0].messages[0].content_blocks[0]["type"] == expected_type
 
 
 class TestAnthropicSettingsStripped:

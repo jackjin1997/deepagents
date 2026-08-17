@@ -3927,37 +3927,42 @@ class TestCreateCliAgentFsToolsWiring:
         assert isinstance(result, dict)
 
     def test_restricted_middleware_replaces_sdk_default_by_name(self) -> None:
-        """The security guarantee rests on the SDK's replace-by-name merge.
+        """The model resolver occupies the outer SDK filesystem slot.
 
-        The other tests in this class assert what `create_cli_agent` *passes*
-        to `create_deep_agent`; they trust the SDK to replace its own default
-        `FilesystemMiddleware` with dcode's restricted one (matched by `.name`)
-        rather than append a second, unrestricted instance that would win. This
-        exercises the real SDK merge so that contract fails loudly here if it
-        ever changes, instead of silently leaving the restriction inert.
+        The renamed runtime filesystem remains inside it, so filesystem
+        filtering observes the effective model while retaining filesystem tools.
         """
         from deepagents.graph import _apply_custom_middleware
         from deepagents.middleware.filesystem import FilesystemMiddleware
 
+        from deepagents_code.agent import (
+            _ConfigurableModelFilesystemSlot,
+            _RuntimeFilesystemMiddleware,
+        )
+
         sdk_default = FilesystemMiddleware()  # unrestricted, as the SDK builds it
-        restricted = FilesystemMiddleware(tools=["ls", "read_file"])
-        # The merge key: both instances must share a `.name` or replacement
-        # degrades into appending two middleware.
-        assert restricted.name == sdk_default.name
+        model_slot = _ConfigurableModelFilesystemSlot(openai_prompt_cache_key=False)
+        runtime_filesystem = _RuntimeFilesystemMiddleware(tools=["ls", "read_file"])
+        assert model_slot.name == sdk_default.name
+        assert runtime_filesystem.name != sdk_default.name
 
-        merged = _apply_custom_middleware([sdk_default], [restricted])
+        merged = _apply_custom_middleware(
+            [sdk_default],
+            [model_slot, runtime_filesystem],
+            core_names={sdk_default.name},
+        )
 
-        fs_middleware = [m for m in merged if isinstance(m, FilesystemMiddleware)]
-        assert len(fs_middleware) == 1
-        # Identity is the contract: the restricted instance replaced the default
-        # rather than a second instance being appended. (No need to read the
-        # SDK-private `_enabled_tools` — that the *restricted* instance survived
-        # is exactly what proves replace-by-name.)
-        assert fs_middleware[0] is restricted
+        assert merged == [model_slot, runtime_filesystem]
+        assert isinstance(merged[1], FilesystemMiddleware)
 
-    def test_none_does_not_add_filesystem_middleware(self, tmp_path: Path) -> None:
-        """`fs_tools=None` (default) leaves the SDK's own default in place."""
-        from deepagents.middleware.filesystem import FilesystemMiddleware
+    def test_default_orders_model_resolution_before_filesystem(
+        self, tmp_path: Path
+    ) -> None:
+        """The unrestricted default still resolves `/model` before filtering."""
+        from deepagents_code.agent import (
+            _ConfigurableModelFilesystemSlot,
+            _RuntimeFilesystemMiddleware,
+        )
 
         mock_settings = self._build_mock_settings(tmp_path)
 
@@ -3987,8 +3992,23 @@ class TestCreateCliAgentFsToolsWiring:
             )
 
         _, kwargs = mock_create.call_args
-        middleware_types = [type(m) for m in kwargs["middleware"]]
-        assert FilesystemMiddleware not in middleware_types
+        middleware = kwargs["middleware"]
+        model_index = next(
+            i
+            for i, item in enumerate(middleware)
+            if isinstance(item, _ConfigurableModelFilesystemSlot)
+        )
+        filesystem_index = next(
+            i
+            for i, item in enumerate(middleware)
+            if isinstance(item, _RuntimeFilesystemMiddleware)
+        )
+        assert model_index < filesystem_index
+        assert {tool.name for tool in middleware[filesystem_index].tools} >= {
+            "ls",
+            "read_file",
+            "write_file",
+        }
 
     def test_explicit_list_adds_restricted_filesystem_middleware(
         self, tmp_path: Path
@@ -4009,6 +4029,10 @@ class TestCreateCliAgentFsToolsWiring:
             patch("deepagents_code.agent.MemoryMiddleware"),
             patch(
                 "deepagents_code.agent.FilesystemMiddleware",
+                side_effect=fs_factory,
+            ),
+            patch(
+                "deepagents_code.agent._RuntimeFilesystemMiddleware",
                 side_effect=fs_factory,
             ),
             patch(
@@ -4196,6 +4220,10 @@ class TestCreateCliAgentFsToolsWiring:
                 side_effect=fs_factory,
             ),
             patch(
+                "deepagents_code.agent._RuntimeFilesystemMiddleware",
+                side_effect=fs_factory,
+            ),
+            patch(
                 "deepagents_code.agent.create_deep_agent",
                 return_value=mock_agent,
             ) as mock_create,
@@ -4273,6 +4301,10 @@ class TestCreateCliAgentFsToolsWiring:
             ),
             patch(
                 "deepagents_code.agent.FilesystemMiddleware",
+                side_effect=fs_factory,
+            ),
+            patch(
+                "deepagents_code.agent._RuntimeFilesystemMiddleware",
                 side_effect=fs_factory,
             ),
             patch(

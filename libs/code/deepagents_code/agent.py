@@ -116,6 +116,20 @@ from deepagents_code.unicode_security import (
 
 logger = logging.getLogger(__name__)
 
+
+class _ConfigurableModelFilesystemSlot(ConfigurableModelMiddleware):
+    """Resolve the runtime model in the SDK filesystem middleware's outer slot."""
+
+    @property
+    def name(self) -> str:
+        """Replace the SDK filesystem slot while preserving its stack position."""
+        return FilesystemMiddleware.__name__
+
+
+class _RuntimeFilesystemMiddleware(FilesystemMiddleware):
+    """Provide filesystem behavior after the effective runtime model is resolved."""
+
+
 _MEMORY_READONLY_SYSTEM_PROMPT = (
     "<agent_memory>\n"
     "{agent_memory}\n\n"
@@ -2274,10 +2288,10 @@ def create_cli_agent(
             `--allow-fs-tools`. `None` (default; also what `--allow-fs-tools
             all` parses to) leaves `FilesystemMiddleware` at its SDK default
             (all tools). An explicit list (which must include `"read_file"`)
-            installs a `FilesystemMiddleware` restricted to those tool names,
-            replacing the SDK's default for the main agent and every synchronous
-            subagent (including `general-purpose`) as well as the nested
-            goal-criteria agent, so delegation cannot bypass the restriction.
+            restricts the runtime `FilesystemMiddleware` to those tool names for
+            the main agent and every synchronous subagent (including
+            `general-purpose`) as well as the nested goal-criteria agent, so
+            delegation cannot bypass the restriction.
             Async subagents are unaffected (they run on their own remote
             backend, not the local filesystem).
         enable_ask_user: Enable `AskUserMiddleware` so the agent can ask
@@ -2550,7 +2564,7 @@ def create_cli_agent(
 
     # Build middleware stack based on enabled features
     agent_middleware: list[AgentMiddleware[Any, Any]] = [
-        ConfigurableModelMiddleware(),
+        _ConfigurableModelFilesystemSlot(),
     ]
     if not interactive:
         agent_middleware.append(_GlmTerminalStallRecovery())
@@ -2889,29 +2903,21 @@ def create_cli_agent(
     hooks_cwd = Path(effective_cwd) if effective_cwd is not None else Path.cwd()
     agent_middleware.append(ServerHooksMiddleware(cwd=hooks_cwd, mcp_tools=mcp_tools))
 
-    if fs_tools is not None:
-        # `fs_tools` is an explicit allowlist here (`--allow-fs-tools all` and an
-        # omitted flag both arrive as `None`, leaving the SDK default in place).
-        main_tool_descriptions = _get_harness_tool_descriptions(model)
-        # Overrides the SDK's default `FilesystemMiddleware` (matched by
-        # `.name` in `create_deep_agent`'s custom-middleware merge) for the
-        # main agent. Preserve the SDK harness's model-specific tool metadata
-        # on the replacement.
-        #
-        # NOTE: this replacement only carries `backend`/`tools`/descriptions.
-        # The SDK also builds its default with `_permissions`; dcode passes no
-        # filesystem `permissions` to `create_deep_agent` today, so there is
-        # nothing to preserve. If dcode ever adopts filesystem permissions,
-        # they must be threaded through here (and into
-        # `_inject_fs_tools_into_subagents`) or `--allow-fs-tools` would
-        # silently strip them.
-        agent_middleware.append(
-            FilesystemMiddleware(
-                backend=composite_backend,
-                tools=fs_tools,
-                custom_tool_descriptions=main_tool_descriptions,
-            )
+    # The configurable-model shim occupies the SDK filesystem slot, which is
+    # the first (outermost) model-call middleware. Keep the actual filesystem
+    # middleware under a distinct name so it is inserted after the SDK core
+    # stack. Multimodal scrubbing then sees the model selected by `/model`, not
+    # the startup model. `tools=None` preserves the SDK's unrestricted default.
+    main_tool_descriptions = _get_harness_tool_descriptions(model)
+    agent_middleware.append(
+        _RuntimeFilesystemMiddleware(
+            backend=composite_backend,
+            tools=fs_tools,
+            custom_tool_descriptions=main_tool_descriptions,
         )
+    )
+
+    if fs_tools is not None:
         # dcode always supplies its own `general-purpose` spec, so the SDK's
         # auto-created-GP middleware inheritance path never fires; the
         # restriction must be injected into each subagent's own `middleware`
