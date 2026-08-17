@@ -3305,6 +3305,8 @@ class TestPatchToolCallsMiddleware:
         assert patched_messages[3].type == "tool"
         assert patched_messages[3].name == "get_events_for_days"
         assert patched_messages[3].tool_call_id == "123"
+        assert patched_messages[3].content == "Tool call get_events_for_days with id 123 has no recorded result."
+        assert patched_messages[3].status == "error"
         assert patched_messages[4].type == "human"
         assert patched_messages[4].content == "What is the weather in Tokyo?"
 
