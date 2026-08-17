@@ -230,6 +230,26 @@ async def test_filesystem_backend_intercept_large_tool_result_async(tmp_path: Pa
     assert saved_file.read_text() == large_content
 
 
+async def test_filesystem_backend_aintercept_large_tool_result_with_long_tool_call_id(tmp_path: Path):
+    """Async eviction uses the same bounded path while preserving message identity."""
+    middleware = FilesystemMiddleware(
+        backend=FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True),
+        tool_token_limit_before_evict=1000,
+    )
+    tool_call_id = "call_2945190__thought__" + "A" * 1400
+    large_content = "result line\n" * 30000
+
+    result = await middleware._aintercept_large_tool_result(ToolMessage(content=large_content, tool_call_id=tool_call_id))
+
+    assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == tool_call_id
+    assert tool_call_id not in result.content
+    [saved_file] = (tmp_path / "large_tool_results").iterdir()
+    assert len(saved_file.name.encode()) <= 64
+    assert f"/large_tool_results/{saved_file.name}" in result.content
+    assert saved_file.read_text() == large_content
+
+
 async def test_filesystem_aupload_single_file(tmp_path: Path):
     """Test async uploading a single binary file."""
     root = tmp_path

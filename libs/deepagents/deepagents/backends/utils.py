@@ -6,6 +6,7 @@ enable composition without fragile string parsing.
 """
 
 import functools
+import hashlib
 import logging
 import os
 import re
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 EMPTY_CONTENT_WARNING = "System reminder: File exists but has empty contents"
 MAX_VIDEO_INPUT_BYTES: Final = 1024 * 1024 * 1024
 """Maximum raw video payload size accepted by `read_file` frame extraction."""
+_MAX_TOOL_CALL_ID_PATH_BYTES: Final = 64
+_TOOL_CALL_ID_PREFIX_BYTES: Final = 40
+_TOOL_CALL_ID_DIGEST_LENGTH: Final = 16
 
 FileType = Literal["text", "image", "audio", "video", "file"]
 """Classification of a file by extension."""
@@ -185,11 +189,19 @@ def _normalize_content(file_data: FileData) -> str:
 
 
 def sanitize_tool_call_id(tool_call_id: str) -> str:
-    r"""Sanitize tool_call_id to prevent path traversal and separator issues.
+    r"""Sanitize `tool_call_id` for use as a bounded file path component.
 
-    Replaces dangerous characters (., /, \) with underscores.
+    Replaces dangerous characters (., /, \) with underscores. Long ids are
+    shortened with a digest because some providers embed opaque metadata in
+    them that can exceed filesystem component limits.
     """
-    return tool_call_id.replace(".", "_").replace("/", "_").replace("\\", "_")
+    sanitized_id = tool_call_id.replace(".", "_").replace("/", "_").replace("\\", "_")
+    if len(sanitized_id.encode()) <= _MAX_TOOL_CALL_ID_PATH_BYTES:
+        return sanitized_id
+
+    readable_prefix = sanitized_id[:_TOOL_CALL_ID_PREFIX_BYTES].encode()[:_TOOL_CALL_ID_PREFIX_BYTES].decode(errors="ignore")
+    digest = hashlib.sha256(tool_call_id.encode()).hexdigest()[:_TOOL_CALL_ID_DIGEST_LENGTH]
+    return f"{readable_prefix}-{digest}"
 
 
 def format_content_with_line_numbers(

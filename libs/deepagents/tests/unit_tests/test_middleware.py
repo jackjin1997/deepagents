@@ -2072,6 +2072,19 @@ class TestFilesystemMiddleware:
         assert sanitize_tool_call_id("call/123") == "call_123"
         assert sanitize_tool_call_id("test.id") == "test_id"
 
+    def test_sanitize_long_tool_call_id_is_bounded_and_collision_resistant(self):
+        """Long provider metadata in tool call ids produces a stable path stem."""
+        prefix = "call_2945190__thought__"
+        first_id = prefix + "A" * 1400
+        second_id = prefix + "B" * 1400
+
+        first_stem = sanitize_tool_call_id(first_id)
+
+        assert len(first_stem) <= 64
+        assert first_stem == sanitize_tool_call_id(first_id)
+        assert first_stem != sanitize_tool_call_id(second_id)
+        assert first_stem.startswith(prefix)
+
     def test_intercept_sanitizes_tool_call_id(self):
         """Test that tool_call_id with dangerous characters is sanitized in file path."""
         backend, mem_store = _make_backend()

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     from deepagents.backends.protocol import BackendProtocol
 
-TOO_LARGE_TOOL_MSG = """Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
+TOO_LARGE_TOOL_MSG = """Tool result too large. It was saved in the filesystem at this path: {file_path}
 
 You can read the result from the filesystem by using the read_file tool, but make sure to only read part of the result at a time.
 
@@ -126,7 +126,7 @@ def _offload_tool_message_content(
 
     The replacement carries a head+tail preview and the offload path in
     `TOO_LARGE_TOOL_MSG` format so the agent can `read_file` the full content
-    by tool_call_id. Returns `None` if the backend write fails — caller should
+    from the derived path. Returns `None` if the backend write fails — caller should
     keep the original message in that case.
     """
     sanitized_id = sanitize_tool_call_id(message.tool_call_id) if message.tool_call_id else "unknown"
@@ -135,7 +135,6 @@ def _offload_tool_message_content(
     if result is None or result.error:
         return None
     replacement_text = TOO_LARGE_TOOL_MSG.format(
-        tool_call_id=message.tool_call_id,
         file_path=file_path,
         content_sample=_create_content_preview(content_str),
     )
@@ -155,7 +154,6 @@ async def _aoffload_tool_message_content(
     if result is None or result.error:
         return None
     replacement_text = TOO_LARGE_TOOL_MSG.format(
-        tool_call_id=message.tool_call_id,
         file_path=file_path,
         content_sample=_create_content_preview(content_str),
     )
