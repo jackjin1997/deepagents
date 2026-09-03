@@ -12,12 +12,15 @@ from __future__ import annotations
 import pytest
 from langchain_core.messages import AIMessage
 
+import tests.evals.utils as eval_utils
 from tests.evals.utils import (
     AgentStep,
     AgentTrajectory,
     ToolCall,
     ToolCalled,
     ToolNotCalled,
+    TrajectoryScorer,
+    max_tool_call_requests,
     tool_call,
     tool_called,
     tool_not_called,
@@ -191,6 +194,72 @@ class TestToolCall:
             args_equals={"a": 1, "b": 2},
         )
         assert assertion.check(traj)
+
+
+class TestEfficiencyLogging:
+    def test_logs_each_tool_call_expectation_without_failing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        feedback: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            eval_utils.t,
+            "log_feedback",
+            lambda **kwargs: feedback.append(kwargs),
+        )
+        trajectory = _traj(_step(1, _tc("fetch_page")))
+        scorer = TrajectoryScorer().expect(
+            tool_calls=[
+                tool_call(name="fetch_page"),
+                tool_call(name="lookup_population", step=1),
+            ]
+        )
+
+        result = eval_utils._log_efficiency(trajectory, scorer)
+
+        assert result is not None
+        assert result.expected_steps is None
+        assert result.expected_tool_calls is None
+        assertions = [
+            item for item in feedback if str(item["key"]).startswith("efficiency_tool_call_")
+        ]
+        assert assertions == [
+            {
+                "key": "efficiency_tool_call_1",
+                "score": True,
+                "value": repr(tool_call(name="fetch_page")),
+            },
+            {
+                "key": "efficiency_tool_call_2",
+                "score": False,
+                "value": repr(tool_call(name="lookup_population", step=1)),
+                "comment": (
+                    "Missing expected tool call in step 1: name='lookup_population', "
+                    "args_contains=None, args_equals=None"
+                ),
+            },
+        ]
+
+    def test_logs_other_efficiency_assertions_polymorphically(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        feedback: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            eval_utils.t,
+            "log_feedback",
+            lambda **kwargs: feedback.append(kwargs),
+        )
+        trajectory = _traj(_step(1, _tc("fetch_page")))
+        scorer = TrajectoryScorer(_expectations=(max_tool_call_requests(0),))
+
+        result = eval_utils._log_efficiency(trajectory, scorer)
+
+        assert result is not None
+        assert {
+            "key": "efficiency_max_tool_call_requests_1",
+            "score": False,
+            "value": repr(max_tool_call_requests(0)),
+            "comment": "Expected at most 0 tool call requests, got 1",
+        } in feedback
 
 
 # ---------------------------------------------------------------------------
