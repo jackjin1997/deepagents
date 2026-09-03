@@ -89,6 +89,22 @@ def test_store_backend_read_negative_offset_starts_at_first_line():
     assert result.end_line == 2
 
 
+def test_store_backend_reports_utf8_byte_sizes() -> None:
+    mem_store = InMemoryStore()
+    backend = StoreBackend(store=mem_store, namespace=lambda _rt: ("filesystem",))
+    content = "hello 😀 €"
+    backend.write("/unicode.txt", content)
+
+    listing = backend.ls("/").entries
+    matches = backend.glob("*.txt", path="/").matches
+
+    expected_size = len(content.encode())
+    assert listing is not None
+    assert listing[0]["size"] == expected_size
+    assert matches is not None
+    assert matches[0]["size"] == expected_size
+
+
 def test_store_backend_reads_mkv_as_binary_without_slicing():
     """`.mkv` reads bypass text line-slicing so binary bytes are returned intact.
 

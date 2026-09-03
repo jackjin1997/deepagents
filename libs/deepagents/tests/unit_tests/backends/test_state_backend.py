@@ -49,6 +49,22 @@ def test_state_backend_read_negative_offset_starts_at_first_line(monkeypatch: py
     assert result.end_line == 2
 
 
+def test_state_backend_reports_utf8_byte_sizes(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = StateBackend()
+    content = "hello 😀 €"
+    files = {"/unicode.txt": {"content": content, "encoding": "utf-8"}}
+    monkeypatch.setattr(backend, "_read_files", lambda: files)
+
+    listing = backend.ls("/").entries
+    matches = backend.glob("*.txt", path="/").matches
+
+    expected_size = len(content.encode())
+    assert listing is not None
+    assert listing[0]["size"] == expected_size
+    assert matches is not None
+    assert matches[0]["size"] == expected_size
+
+
 def test_state_backend_reads_legacy_list_content(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = StateBackend()
     legacy_content = ["hello", "world", ""]
