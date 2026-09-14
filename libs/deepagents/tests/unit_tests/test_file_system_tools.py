@@ -4,7 +4,6 @@ At the moment these tests are written against the state backend, but we will nee
 to extend them to other backends as well.
 """
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -352,15 +351,8 @@ def test_grep_finds_written_file() -> None:
     assert "/project/main.py" in grep_message.content, "Grep should reference the file containing 'import'"
 
 
-# Our reducers do not handle parallel edits in StateBackend.
-# These will also not work correctly for other backends due to race conditions.
-# Even sandbox/file system backend could get into some edge cases (e.g., if the edits are overlapping)
-# Generally best to instruct the LLM to avoid parallel edits of the same file likely.
-@pytest.mark.xfail(reason="We should add after_model middleware to fail parallel edits of the same file.")
-def test_parallel_edit_file_calls() -> None:
-    """Verify that parallel edit_file calls correctly update file state."""
-    # Fake model will write a file, then issue multiple edit_file calls in parallel
-    fake_model = GenericFakeChatModel(
+def _parallel_edit_file_model() -> GenericFakeChatModel:
+    return GenericFakeChatModel(
         messages=iter(
             [
                 AIMessage(
@@ -407,16 +399,89 @@ def test_parallel_edit_file_calls() -> None:
         )
     )
 
+
+def test_parallel_edit_file_calls() -> None:
+    """Reject later parallel edits to the same file without losing the first edit."""
+    fake_model = _parallel_edit_file_model()
+
     agent = create_deep_agent(
         model=fake_model,
         checkpointer=InMemorySaver(),
     )
 
-    _ = agent.invoke(
+    result = agent.invoke(
         {"messages": [HumanMessage(content="Edit file in parallel")]},
         config={"configurable": {"thread_id": "test_thread_parallel_edits"}},
     )
-    assert False, "Finish implementing correct behavior to add a ToolMessage with error if parallel edits to the same file are attempted."  # noqa: PT015, B011
+
+    edit_results = {
+        message.tool_call_id: message for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "edit_file"
+    }
+    assert edit_results["call_edit_1"].status == "success"
+    assert edit_results["call_edit_2"].status == "error"
+    assert "parallel" in edit_results["call_edit_2"].text.lower()
+    assert result["files"]["/multi.txt"]["content"] == "line 1\nline two\nline three"
+
+
+async def test_parallel_edit_file_calls_async() -> None:
+    """Apply the same-path mutation guard during async tool execution."""
+    agent = create_deep_agent(
+        model=_parallel_edit_file_model(),
+        checkpointer=InMemorySaver(),
+    )
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="Edit file in parallel")]},
+        config={"configurable": {"thread_id": "test_thread_parallel_edits_async"}},
+    )
+
+    edit_results = {
+        message.tool_call_id: message for message in result["messages"] if isinstance(message, ToolMessage) and message.name == "edit_file"
+    }
+    assert edit_results["call_edit_1"].status == "success"
+    assert edit_results["call_edit_2"].status == "error"
+    assert result["files"]["/multi.txt"]["content"] == "line 1\nline two\nline three"
+
+
+def test_parallel_mixed_file_mutations() -> None:
+    """Reject a later mutation even when it uses a different filesystem tool."""
+    fake_model = GenericFakeChatModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "/multi.txt", "content": "keep me"},
+                            "id": "call_write",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "delete",
+                            "args": {"file_path": "/multi.txt"},
+                            "id": "call_delete",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                AIMessage(content="Done."),
+            ]
+        )
+    )
+    agent = create_deep_agent(
+        model=fake_model,
+        checkpointer=InMemorySaver(),
+    )
+
+    result = agent.invoke(
+        {"messages": [HumanMessage(content="Replace a file in parallel")]},
+        config={"configurable": {"thread_id": "test_thread_mixed_mutations"}},
+    )
+
+    delete_result = next(message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "call_delete")
+    assert delete_result.status == "error"
+    assert result["files"]["/multi.txt"]["content"] == "keep me"
 
 
 def test_path_traversal_returns_error_message() -> None:
