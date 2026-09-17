@@ -209,6 +209,7 @@ def resolve_mcp_config(
         _drop_invalid_mcp_config_servers,
         _load_mcp_config_top_level_with_error,
         _merge_mcp_configs_with_sources,
+        _resolve_project_config_base,
         discover_mcp_config_sources,
         filter_trusted_project_servers,
         load_mcp_config,
@@ -229,14 +230,19 @@ def resolve_mcp_config(
             used_paths=(Path(config_path),),
         )
 
+    from deepagents_code.plugins.adapters.mcp import discover_plugin_mcp_configs
+
+    project_dir = _resolve_project_config_base(None)
+    plugin_configs = discover_plugin_mcp_configs(project_dir=project_dir)
     found = discover_mcp_config_sources()
-    if not found:
+    if not found and not plugin_configs:
         return ConfigResolutionError(
             kind=ConfigErrorKind.NO_CONFIG_FOUND,
             message=(
-                "No MCP config file found in any auto-discovered location. "
-                "Pass --mcp-config <path>, or run `dcode mcp login --help` "
-                "to see the search paths and config format."
+                "No MCP config file or plugin-provided server found in any "
+                "auto-discovered location. Pass --mcp-config <path>, or run "
+                "`dcode mcp login --help` to see the search paths and config "
+                "format."
             ),
         )
 
@@ -264,7 +270,7 @@ def resolve_mcp_config(
         elif error is not None:
             load_errors.append((path, error))
 
-    if project_paths:
+    if plugin_configs or project_paths:
         from deepagents_code.model_config import load_mcp_server_trust_lists
 
         trust_lists = load_mcp_server_trust_lists()
@@ -277,6 +283,38 @@ def resolve_mcp_config(
             # trust-list loader has already discarded scoped approvals while
             # retaining names explicitly enabled through the readable env var.
             policy_error = trust_lists.read_error
+
+        plugin_used = False
+        for plugin_config in plugin_configs:
+            plugin_servers = plugin_config.get("mcpServers")
+            if plugin_servers is None or (
+                isinstance(plugin_servers, dict) and not plugin_servers
+            ):
+                continue
+            if not isinstance(plugin_servers, dict):
+                load_errors.append(
+                    (
+                        Path("<plugin>"),
+                        (
+                            "plugin 'mcpServers' must be a mapping of name to "
+                            "server definition, got "
+                            f"{type(plugin_servers).__name__}"
+                        ),
+                    )
+                )
+                continue
+            plugin_kept = filter_trusted_project_servers(
+                plugin_servers,
+                trust_lists,
+                project_root=project_dir,
+                config_trusted=not trust_lists.load_failed,
+            )
+            if plugin_kept:
+                configs.append({**plugin_config, "mcpServers": plugin_kept})
+                plugin_used = True
+        if plugin_used:
+            used_paths.append(Path("<plugin>"))
+
         config_trusted = trust_project_mcp is True and not trust_lists.load_failed
         loaded_projects: list[tuple[Path, dict[str, Any]]] = []
         for path in project_paths:
@@ -334,8 +372,10 @@ def resolve_mcp_config(
             detail = "; ".join(f"{path}: {error}" for path, error in load_errors)
             message = f"No usable MCP config found (load errors: {detail})"
         else:
-            found_paths = ", ".join(str(source.path) for source in found)
-            message = f"No usable MCP config found in: {found_paths}"
+            found_paths = [str(source.path) for source in found]
+            if plugin_configs:
+                found_paths.append("<plugin>")
+            message = f"No usable MCP config found in: {', '.join(found_paths)}"
         return ConfigResolutionError(
             kind=ConfigErrorKind.NO_USABLE_CONFIG,
             message=message,

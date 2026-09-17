@@ -105,6 +105,42 @@ class TestResolveMcpConfigExplicit:
 class TestResolveMcpConfigAutodiscover:
     """Auto-discovery resolution path."""
 
+    def test_plugin_server_is_available_without_file_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An enabled plugin's MCP server can be selected for login."""
+        _isolate_project_mcp_trust_lists(monkeypatch, tmp_path)
+        server_name = "plugin__example__server"
+        plugin_config = {
+            "mcpServers": {
+                server_name: {
+                    "transport": "http",
+                    "url": "https://example.com/mcp",
+                    "auth": "oauth",
+                }
+            }
+        }
+
+        with (
+            patch(
+                "deepagents_code.mcp_tools.discover_mcp_config_sources",
+                return_value=[],
+            ),
+            patch(
+                "deepagents_code.plugins.adapters.mcp.discover_plugin_mcp_configs",
+                return_value=(plugin_config,),
+            ),
+        ):
+            result = resolve_mcp_config(None)
+
+        assert isinstance(result, ConfigResolution)
+        assert result.used_paths == (Path("<plugin>"),)
+        selection = select_server(result, server_name)
+        assert isinstance(selection, ServerSelection)
+        assert selection.server_config == plugin_config["mcpServers"][server_name]
+
     def test_untrusted_only_returns_no_usable_config_with_paths(
         self,
         tmp_path: Path,
