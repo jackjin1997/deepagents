@@ -912,6 +912,7 @@ def _subagent_runtime(
 
 async def test_call_subagent_task_tool_forwards_config_and_tool_call_id() -> None:
     calls: list[dict[str, Any]] = []
+    callbacks = [object()]
 
     class _TaskTool:
         name = "task"
@@ -920,12 +921,14 @@ async def test_call_subagent_task_tool_forwards_config_and_tool_call_id() -> Non
             self,
             tool_input: dict[str, Any],
             *,
+            callbacks: Any = None,
             config: dict[str, Any] | None = None,
             tool_call_id: str | None = None,
         ) -> str:
             calls.append(
                 {
                     "tool_input": tool_input,
+                    "callbacks": callbacks,
                     "config": config,
                     "tool_call_id": tool_call_id,
                 }
@@ -935,7 +938,10 @@ async def test_call_subagent_task_tool_forwards_config_and_tool_call_id() -> Non
     runtime = ToolRuntime(
         state={},
         context={},
-        config={"configurable": {"thread_id": "parent-thread"}},
+        config={
+            "callbacks": callbacks,
+            "configurable": {"thread_id": "parent-thread"},
+        },
         stream_writer=lambda _chunk: None,
         tools=[],
         tool_call_id="outer_eval_call",
@@ -952,6 +958,7 @@ async def test_call_subagent_task_tool_forwards_config_and_tool_call_id() -> Non
 
     assert result == "ok"
     assert calls
+    assert calls[0]["callbacks"] is callbacks
     assert calls[0]["config"] == runtime.config
     assert calls[0]["tool_call_id"].startswith("ptc_task_")
     assert calls[0]["tool_input"]["runtime"].tool_call_id == calls[0]["tool_call_id"]
